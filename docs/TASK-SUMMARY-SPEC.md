@@ -17,7 +17,7 @@ summary 是系统写的描述文字，**不改**卡片业务状态（lane），�
 - 输入（无状态，每次完整传入）：卡片标题、描述（≤2000 字）、当前 lane 名、上一版 summary（若有）、本轮或合并轮次的文本。
 - 回合文本：取 hook 自带的 `timeline`；Paseo 0.13 起 `agent.turn_ended` 的 `timeline` 恒为空数组（0.12 有内容），此时由 `server/turn-timeline.ts` 读该 session timeline 最新一页（`tail`、200 条、`projected`）并取最后一轮，与手动 Refresh 同一做法；读取失败保持空，本轮不生成。`user_message` → `User:`，`assistant_message` → `Assistant:`，`tool_call` 只记名字（连续调用合并为一行 `Tools: a, b ×3`），`error` 记一行，其余（reasoning、todo、compaction、plugin、notification）忽略。总长 ≤12000 字，超出时保留开头 3000 字与结尾，中间标注省略。
 - 调用：`paseo.workspaces.ref(<卡片 workspace>).agents.create`（2026-10-15 修订，用户选 B）
-  - 作为**刚结束回合的 session 的子 session**（`parent`）运行在卡片自己的 workspace 中，不新建原生 project 或 workspace；
+  - 运行在项目的 `Flowly background` 后台 workspace 中（BACKGROUND-WORKSPACE-SPEC，2026-11-01 起），不是卡片的 workspace，也不设 `parent`：卡片 workspace 里的子 session 会被 Paseo 打开成标签页，硬删除后标签页显示 "Agent not found"；
   - `config.provider`：设置中的 Summary model（§4）；
   - `title`：`Kanban summary · <卡片标题>`；`labels`：`{"flowly": "summarizer", "flowly-task": <taskId>}`；
   - `prompt` 与 `outputSchema`（§3）；

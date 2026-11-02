@@ -25,6 +25,7 @@ import {
 import { daemonRemoveAgent, type RemoveAgent } from "./summarizer-remove";
 import { runSummaryModels } from "./summary-models";
 import { logFailure } from "./error-report";
+import { backgroundWorkspaces, type BackgroundWorkspaces } from "./background-workspace";
 export { availableModels } from "./summary-models";
 import { summaryRow } from "../shared/native-session";
 
@@ -169,6 +170,7 @@ export class SummaryService {
     private timeoutMs = SUMMARY_TIMEOUT_MS,
     private rowTimeoutMs = SUMMARY_ROW_TIMEOUT_MS,
     private remove: RemoveAgent = daemonRemoveAgent(),
+    private background: BackgroundWorkspaces = backgroundWorkspaces(board.directory),
   ) {}
 
   running() {
@@ -252,9 +254,8 @@ export class SummaryService {
       transcript: truncateTranscript(batch.text),
       language: await this.language(),
     });
-    const { model, output } = await runSummaryModels(paseo, summaryModelsOf(settings), {
-      create: (model) => paseo.workspaces.ref(task.workspaceId).agents.create({
-        parent: batch.agentIds[batch.agentIds.length - 1],
+    const { model, output } = await this.background.use(project, paseo, (workspaceId) => runSummaryModels(paseo, summaryModelsOf(settings), {
+      create: (model) => paseo.workspaces.ref(workspaceId).agents.create({
         config: { provider: model },
         title: `Kanban summary · ${task.title}`.slice(0, 120),
         labels: { ...SUMMARIZER_LABELS, "flowly-task": taskId },
@@ -264,7 +265,7 @@ export class SummaryService {
       parse: parseModelOutput,
       remove: this.remove,
       timeoutMs: this.timeoutMs,
-    });
+    }));
     if (!output.update && previous) {
       await this.store.clearError(taskId);
       return null;

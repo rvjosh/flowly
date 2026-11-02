@@ -37,9 +37,13 @@ export function daemonRevive(recovery: WorkspaceRecovery = daemonWorkspaceRecove
 const stateSchema = z.object({ version: z.literal(1), projects: z.record(z.string(), z.string()) });
 type State = z.infer<typeof stateSchema>;
 
+/** Where a background workspace lives: a Flowly project, or a Paseo project for sessions outside Flowly. */
+export type BackgroundPlace = Pick<Project, "id" | "primaryPath" | "paseoProjectId">;
+
 /**
- * Project-level temporary sessions (memory review, digest, workflow insights) run in one
- * plugin-owned workspace per project at its root, never in a card's (BACKGROUND-WORKSPACE-SPEC).
+ * Flowly's temporary sessions (card summary, session insights, memory review, digest, workflow insights)
+ * run in one plugin-owned background workspace per project at its root, never in a card's or the
+ * person's workspace (BACKGROUND-WORKSPACE-SPEC).
  * It is archived when the last run in it ends; the next run restores and reuses it, and only
  * makes a new one when it cannot be brought back.
  */
@@ -56,7 +60,7 @@ export class BackgroundWorkspaces {
   }
 
   /** Runs `work` with the project's background workspace open; archives it after the last run. */
-  async use<T>(project: Project, paseo: PaseoApi, work: (workspaceId: string) => Promise<T>): Promise<T> {
+  async use<T>(project: BackgroundPlace, paseo: PaseoApi, work: (workspaceId: string) => Promise<T>): Promise<T> {
     const id = await this.locked(project.id, async () => {
       const slot = this.slots.get(project.id);
       if (slot) {
@@ -81,7 +85,7 @@ export class BackgroundWorkspaces {
     }
   }
 
-  private async open(project: Project, paseo: PaseoApi) {
+  private async open(project: BackgroundPlace, paseo: PaseoApi) {
     const known = (await this.read()).projects[project.id];
     if (known) {
       const state = await this.revive(known).catch((e) => {
@@ -90,11 +94,13 @@ export class BackgroundWorkspaces {
       });
       if (state !== "gone") return known;
     }
+    // `background` keeps the workspace and its sessions out of Paseo's sidebar and agent lists; the pinned SDK types predate it.
     const created = await paseo.workspaces.create({
       title: BACKGROUND_TITLE,
+      background: true,
       idempotencyKey: `flowly-background:${project.id}:${randomUUID()}`,
       source: { kind: "directory", path: project.primaryPath, projectId: project.paseoProjectId },
-    });
+    } as Parameters<PaseoApi["workspaces"]["create"]>[0]);
     await this.write((state) => (state.projects[project.id] = created.id));
     return created.id;
   }
@@ -136,7 +142,7 @@ export class BackgroundWorkspaces {
   }
 }
 
-/** One per data directory, so memory review, digest and workflow insights share one workspace and count. */
+/** One per data directory, so every temporary run in a project shares one workspace and count. */
 const shared = new Map<string, BackgroundWorkspaces>();
 export function backgroundWorkspaces(directory: string) {
   let found = shared.get(directory);

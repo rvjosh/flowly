@@ -27,6 +27,7 @@ import { runSummaryModels } from "./summary-models";
 import type { NextMoveRows } from "./next-move-rows";
 import { generatedBranchName, resolveWorktreeBaseRef } from "./service";
 import { logFailure } from "./error-report";
+import { backgroundWorkspaces, type BackgroundPlace, type BackgroundWorkspaces } from "./background-workspace";
 
 /** `session-insights.json`: serialized writes, backup, atomic replacement; invalid data is preserved, never reset. */
 export class SessionInsightStore {
@@ -115,6 +116,7 @@ export class SessionInsightService {
     private timeoutMs = INSIGHT_TIMEOUT_MS,
     private rowTimeoutMs = ROW_TIMEOUT_MS,
     private remove: RemoveAgent = daemonRemoveAgent(),
+    private background: BackgroundWorkspaces = backgroundWorkspaces(store.directory),
   ) {}
 
   running() {
@@ -194,15 +196,14 @@ export class SessionInsightService {
     const before = (await this.store.read()).sessions.find((s) => s.agentId === agent.id);
     const open = (before?.ideas ?? []).filter((i) => i.status === "open");
     const language = await this.language();
-    // A child of the session in its own workspace, like the card summarizer: no new project or workspace.
     const prompt = insightPrompt({
         title: agent.title || "", cwd: agent.cwd, previous: before?.summary ?? null,
         transcript: truncateTranscript(batch.text), openIdeas: open.map((i) => i.title),
         openIdeaCount: open.length, parts, language,
     });
-    const { model, output } = await runSummaryModels(paseo, settings.model, {
-      create: (model) => paseo.workspaces.ref(agent.workspaceId!).agents.create({
-        parent: agent.id,
+    const place = await this.place(agent.workspaceId!, paseo);
+    const { model, output } = await this.background.use(place, paseo, (workspaceId) => runSummaryModels(paseo, settings.model, {
+      create: (model) => paseo.workspaces.ref(workspaceId).agents.create({
         config: { provider: model },
         title: `Flowly insights · ${agent.title || "session"}`.slice(0, 120),
         labels: { ...SUMMARIZER_LABELS, "flowly-session": agent.id },
@@ -212,7 +213,7 @@ export class SessionInsightService {
       parse: (text) => parseInsightOutput(text, parts),
       remove: this.remove,
       timeoutMs: this.timeoutMs,
-    });
+    }));
     const now = new Date().toISOString();
     // The person already started another turn: the suggestions are for the past one (the summary still counts).
     const stale = (this.started.get(agent.id) ?? "") > batch.endedAt;
@@ -249,6 +250,14 @@ export class SessionInsightService {
     if (stale) return;
     // Rows in Paseo's timeline: best effort, never holding up the next run.
     void this.appendRows(agent, written.summary, written.suggestion, paseo);
+  }
+
+  /** The Paseo project of the session's workspace: its insight runs use that project's background workspace. */
+  private async place(workspaceId: string, paseo: PaseoApi): Promise<BackgroundPlace> {
+    const workspace = await paseo.workspaces.ref(workspaceId).refresh();
+    const project = workspace?.projectId ? (await paseo.projects.list()).projects.find((p) => p.projectId === workspace.projectId) : undefined;
+    if (!project) throw new Error("This session's workspace has no Paseo project.");
+    return { id: `paseo:${project.projectId}`, primaryPath: project.projectRootPath, paseoProjectId: project.projectId };
   }
 
   private async appendRows(

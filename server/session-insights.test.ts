@@ -179,6 +179,16 @@ test("ideas: no duplicate open titles, at most 5 open; a failed run is recorded,
   expect((await x.store.read()).sessions[0].error?.message).toMatch(/timed out/);
 });
 
+test("a turn of Flowly's own insight session does not start another run, though hooks carry no labels", async () => {
+  const x = await setup();
+  x.replies.push({ text: x.json({}) }, { text: x.json({}) });
+  await x.service.enqueue(x.agent, turn("x"), x.paseo);
+  expect(x.created).toHaveLength(1);
+  // What the turn_ended hook delivers for that helper: no labels, no parent.
+  await x.service.enqueue({ id: "helper", workspaceId: "bg", parentAgentId: null, title: "Flowly insights · Fix login", cwd: "/root" }, turn("y"), x.paseo);
+  expect(x.created).toHaveLength(1);
+});
+
 test("idea actions: here sends the instruction, session starts one in the workspace, workspace branches off; each marks it adopted once", async () => {
   const x = await setup();
   const idea = (title: string) => ({ title, detail: "Do it", rationale: "Because", scope: "new" });

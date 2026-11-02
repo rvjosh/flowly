@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BoardStore } from "./store";
 import { SummaryService, SummaryStore } from "./summaries";
+import { BackgroundWorkspaces } from "./background-workspace";
 import type { SummarySettings } from "../shared/summary";
 import { summaryRow } from "../shared/native-session";
 
@@ -28,6 +29,7 @@ async function setup(options: { claude?: boolean } = {}) {
   const replies: Reply[] = [];
   const created: { workspaceId: string; parent: string; provider: string; prompt: string; labels: Record<string, string> }[] = [];
   let archived = 0;
+  const background: unknown[] = [];
   const appended: { agentId: string; row: unknown }[] = [];
   const archivedIds = new Set<string>(), gone = new Set<string>();
   let appendFails = false,
@@ -43,6 +45,11 @@ async function setup(options: { claude?: boolean } = {}) {
       listModels: async (p: string) => ({ models: p === "claude" ? [{ id: "claude-haiku-5-5" }] : [{ id: "gpt-6-luna" }, { id: "gpt-6-sol" }], error: null }),
     },
     workspaces: {
+      create: async (o: { background?: boolean }) => {
+        background.push(o);
+        return { id: "bg" };
+      },
+      archive: async (id: string) => void background.push(`archive ${id}`),
       ref: (workspaceId: string) => ({
         agents: {
       create: async (o: { parent: string; config: { provider: string }; prompt: string; labels: Record<string, string> }) => {
@@ -80,7 +87,7 @@ async function setup(options: { claude?: boolean } = {}) {
   } as unknown as PaseoApi;
   let settings: SummarySettings = { summaryEnabled: true, summaryModel: "", digestEnabled: true, retroEnabled: true };
   const store = new SummaryStore(board.directory);
-  const service = new SummaryService(board, store, async () => settings, async () => "en", undefined, 50, async (a) => { await a.archive(); });
+  const service = new SummaryService(board, store, async () => settings, async () => "en", undefined, 50, async (a) => { await a.archive(); }, new BackgroundWorkspaces(board.directory, async () => "live"));
   const turn = (text: string) => [{ type: "user_message", text }, { type: "assistant_message", text: "ok " + text }];
   const json = (state: string, update = true) => JSON.stringify({ update, state, target: "Goal: g", recap: "r", next: "n" });
   return {
@@ -91,6 +98,7 @@ async function setup(options: { claude?: boolean } = {}) {
     paseo,
     replies,
     created,
+    background,
     archived: () => archived,
     appended,
     archivedIds,
@@ -110,8 +118,10 @@ test("a turn writes a version without touching board or task revisions; the sess
   await x.service.enqueue("t", "a1", x.turn("做登录"), x.paseo);
   const latest = await x.store.latest("t");
   expect(latest).toMatchObject({ state: "实现完成", target: "g", model: "claude/claude-haiku-5-5", agentIds: ["a1"] });
-  // Child of the finishing session in the card's own workspace: no new native project/workspace.
-  expect(x.created[0]).toMatchObject({ workspaceId: "w", parent: "a1", labels: { flowly: "summarizer", "flowly-task": "t" } });
+  // In the project's background workspace, not the card's and not as a child of its session: Paseo shows those as tabs.
+  expect(x.created[0]).toMatchObject({ workspaceId: "bg", labels: { flowly: "summarizer", "flowly-task": "t" } });
+  expect(x.created[0].parent).toBeUndefined();
+  expect(x.background).toEqual([expect.objectContaining({ background: true, source: { kind: "directory", path: x.root, projectId: "n" } }), "archive bg"]);
   expect(x.created[0].prompt).toContain("User: 做登录");
   expect(x.archived()).toBe(1);
   const after = await x.board.read();
@@ -141,7 +151,7 @@ test.each<Reply>([
   x.replies.push(failure, { text: x.json("Luna succeeded") });
   await x.service.enqueue("t", "a1", x.turn("x"), x.paseo);
   expect(x.created.map((a) => a.provider)).toEqual(["claude/claude-haiku-5-5", "codex/gpt-6-luna"]);
-  expect(x.created[1]).toMatchObject({ workspaceId: "w", parent: "a1", prompt: x.created[0].prompt, labels: x.created[0].labels });
+  expect(x.created[1]).toMatchObject({ workspaceId: "bg", prompt: x.created[0].prompt, labels: x.created[0].labels });
   expect(await x.store.history("t")).toHaveLength(1);
   expect(await x.store.latest("t")).toMatchObject({ model: "codex/gpt-6-luna", state: "Luna succeeded" });
   expect((await x.store.read()).errors).toEqual([]);

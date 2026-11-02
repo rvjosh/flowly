@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BoardStore } from "./store";
 import { NextMoveRows } from "./next-move-rows";
 import { SessionInsightService, SessionInsightStore, type InsightSettings, type OutsideAgent } from "./session-insights";
+import { BackgroundWorkspaces } from "./background-workspace";
 
 vi.mock("./service", () => ({
   resolveWorktreeBaseRef: async (dir: string) => {
@@ -29,6 +30,7 @@ async function setup(options: { settings?: Partial<InsightSettings>; agentStatus
   const rows = new NextMoveRows(new BoardStore(join(root, "data")));
   const replies: { text?: string; status?: string; gate?: Promise<void> }[] = [];
   const created: { workspaceId: string; parent?: string; prompt: string; labels?: Record<string, string>; config: { provider: string } }[] = [];
+  const background: unknown[] = [];
   const appended: { agentId: string; row: { kind: string; id: string; data: Record<string, unknown> } }[] = [];
   const sent: { agentId: string; text: string }[] = [];
   const workspacesCreated: unknown[] = [];
@@ -44,7 +46,7 @@ async function setup(options: { settings?: Partial<InsightSettings>; agentStatus
         agents: {
           create: async (o: { parent?: string; prompt: string; labels?: Record<string, string>; config: { provider: string } }) => {
             created.push({ workspaceId, ...o });
-            if (!o.parent) return { id: `new-${created.length}` };
+            if (o.labels?.flowly !== "summarizer") return { id: `new-${created.length}` };
             const reply = replies.shift() || {};
             return {
               waitForFinish: async () => {
@@ -56,11 +58,17 @@ async function setup(options: { settings?: Partial<InsightSettings>; agentStatus
           },
         },
       }),
-      create: async (o: unknown) => {
+      create: async (o: { background?: boolean }) => {
+        if (o.background) {
+          background.push(o);
+          return { id: "bg" };
+        }
         workspacesCreated.push(o);
         return { id: "wks-new" };
       },
+      archive: async (id: string) => void background.push(`archive ${id}`),
     },
+    projects: { list: async () => ({ projects: [{ projectId: "prj", projectRootPath: "/root" }] }) },
     agents: {
       ref: (agentId: string) => ({
         refresh: async () => ({ agent: { id: agentId, archivedAt: null, workspaceId: "w1", provider: "codex", model: "gpt-6-luna", currentModeId: "full-access", thinkingOptionId: null, status: options.agentStatus ?? "idle", cwd: "/repo" } }),
@@ -70,17 +78,20 @@ async function setup(options: { settings?: Partial<InsightSettings>; agentStatus
     },
   } as unknown as PaseoApi;
   let settings: InsightSettings = { enabled: true, parts: { progress: true, nextMoves: true, ideas: true }, model: "", ...options.settings };
-  const service = new SessionInsightService(store, rows, async () => settings, async () => "en", 1000, 1000, async (a) => { await a.archive(); });
+  const service = new SessionInsightService(store, rows, async () => settings, async () => "en", 1000, 1000, async (a) => { await a.archive(); }, new BackgroundWorkspaces(join(root, "data"), async () => "live"));
   const agent: OutsideAgent = { id: "a1", workspaceId: "w1", parentAgentId: null, title: "Fix login", cwd: "/repo" };
   const json = (o: object) => JSON.stringify({ update: true, state: "S", target: "T", recap: "- r", next: "N", moves: [], ideas: [], ...o });
-  return { store, service, paseo, replies, created, appended, sent, workspacesCreated, archived: () => archived, agent, json, set: (s: Partial<InsightSettings>) => (settings = { ...settings, ...s }) };
+  return { store, service, paseo, replies, created, background, appended, sent, workspacesCreated, archived: () => archived, agent, json, set: (s: Partial<InsightSettings>) => (settings = { ...settings, ...s }) };
 }
 
 test("a completed turn of an outside session runs one archived child insight session and stores progress, moves and ideas", async () => {
   const x = await setup();
   x.replies.push({ text: x.json({ moves: [{ label: "Verify", prompt: "Verify it" }], ideas: [{ title: "Add rate limit", detail: "d", rationale: "r", scope: "new" }] }) });
   await x.service.enqueue(x.agent, turn("fix login"), x.paseo);
-  expect(x.created[0]).toMatchObject({ workspaceId: "w1", parent: "a1", labels: { flowly: "summarizer", "flowly-session": "a1" }, config: { provider: "claude/claude-haiku-5-5" } });
+  // Never in the person's workspace or as a child of their session: Paseo shows those as tabs.
+  expect(x.created[0]).toMatchObject({ workspaceId: "bg", labels: { flowly: "summarizer", "flowly-session": "a1" }, config: { provider: "claude/claude-haiku-5-5" } });
+  expect(x.created[0].parent).toBeUndefined();
+  expect(x.background).toEqual([expect.objectContaining({ background: true, source: { kind: "directory", path: "/root", projectId: "prj" } }), "archive bg"]);
   expect(x.created[0].prompt).toContain("User: fix login");
   expect(x.archived()).toBe(1);
   const [s] = (await x.store.read()).sessions;

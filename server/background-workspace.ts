@@ -85,6 +85,11 @@ export class BackgroundWorkspaces {
     }
   }
 
+  /** Whether a workspace is one of these: lifecycle hooks carry no labels, so this is how a hook tells Flowly's own sessions apart. */
+  async owns(workspaceId: string) {
+    return Object.values((await this.read()).projects).includes(workspaceId);
+  }
+
   private async open(project: BackgroundPlace, paseo: PaseoApi) {
     const known = (await this.read()).projects[project.id];
     if (known) {

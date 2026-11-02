@@ -138,7 +138,7 @@ export class SessionInsightService {
 
   /** Resolves when this session's queue is drained (tests); the hook does not wait. */
   async enqueue(agent: OutsideAgent, timeline: readonly { type: string }[], paseo: PaseoApi, endedAt = new Date().toISOString()): Promise<void> {
-    if (!isOutsideCandidate(agent)) return;
+    if (!isOutsideCandidate(agent) || (await this.background.owns(agent.workspaceId!))) return;
     const settings = await this.settings();
     if (!settings.enabled || !(settings.parts.progress || settings.parts.nextMoves || settings.parts.ideas)) return;
     const text = turnText(timeline);
